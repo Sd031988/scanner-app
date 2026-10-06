@@ -654,7 +654,7 @@
   }
 
   const FILTERS = [
-    { id: "original", label: "Original", hint: "nur Beleuchtung" },
+    { id: "original", label: "Original", hint: "entzerren & zuschneiden, unverändert" },
     { id: "color", label: "Farbe" },
     { id: "clear", label: "Klar", hint: "ClearScan-Art: weisses Papier, glatter Text" },
     { id: "document", label: "Dokument" },

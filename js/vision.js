@@ -699,18 +699,10 @@
 
     const g = luma(rgba, w, h);
 
-    if (id === "original") {
-      const bg = illuminationField(g, w, h);
-      if (!bg) { out.set(rgba); return out; }
-      for (let i = 0, k = 0; i < g.length; i++, k += 4) {
-        const b = bg[i];
-        for (let c = 0; c < 3; c++) {
-          out[k + c] = b > 1e-6 ? clamp(rgba[k + c] / 255 / b, 0, 1) * 255 : rgba[k + c];
-        }
-        out[k + 3] = 255;
-      }
-      return out;
-    }
+  if (id === "original") {
+    out.set(rgba);
+    return out;
+  }
 
     if (id === "clear") {
       const flat = removeShadow(g, w, h);

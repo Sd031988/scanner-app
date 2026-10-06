@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>Dokumentenscanner</title>
+<meta name="theme-color" content="#05070a" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="description" content="Dokumentenscanner. Kamerabild, PDF und Texterkennung direkt auf dem Gerät." />
+<link rel="manifest" href="manifest.webmanifest" />
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png" />
+<link rel="apple-touch-icon" href="icons/icon-180.png" />
+<link rel="stylesheet" href="app.css" />
+</head>
+<body>
+
+<section id="cameraScreen" class="screen is-active">
+  <div id="stage" class="stage">
+    <video id="cam" playsinline muted autoplay disablepictureinpicture></video>
+    <canvas id="overlay"></canvas>
+  </div>
+
+  <div class="cam-top">
+    <span id="pageCount" class="pill">0 Seiten</span>
+    <span class="grow"></span>
+    <button id="btnTorch" class="ghost" type="button" hidden aria-label="Licht">Licht</button>
+  </div>
+
+  <p id="liveHint" class="live-hint" hidden>Blatt ruhig halten</p>
+
+  <div class="cam-bottom">
+    <button id="btnPages" class="last-page" type="button" aria-label="Seitenliste">
+      <img id="lastPreview" alt="" />
+      <span id="pagesBadge" class="badge" hidden>0</span>
+    </button>
+    <button id="btnShutter" class="shutter" type="button" aria-label="Aufnehmen"></button>
+    <span class="cam-spacer"></span>
+  </div>
+</section>
+
+<section id="reviewScreen" class="screen">
+  <div class="review-top">
+    <button id="btnReviewBack" class="ghost" type="button" aria-label="Zurück">Zurück</button>
+    <span class="grow"></span>
+    <button id="btnAuto" class="ghost accent" type="button">Auto</button>
+    <button id="btnRotate" class="ghost" type="button" aria-label="Drehen">Drehen</button>
+  </div>
+
+  <div id="reviewStage" class="review-stage">
+    <canvas id="reviewCanvas"></canvas>
+    <div class="handle" data-i="0"></div>
+    <div class="handle" data-i="1"></div>
+    <div class="handle" data-i="2"></div>
+    <div class="handle" data-i="3"></div>
+    <canvas id="loupe" class="loupe" hidden></canvas>
+  </div>
+
+  <div class="review-bottom">
+    <div id="filterStrip" class="filter-strip"></div>
+    <button id="btnAccept" class="accept" type="button" aria-label="Übernehmen"></button>
+  </div>
+</section>
+
+<div id="pagesSheet" class="sheet" hidden>
+  <div class="sheet-inner">
+    <div class="sheet-bar">
+      <span id="sheetTitle" class="sheet-title">Seiten</span>
+      <button id="btnSheetClose" class="ghost" type="button" aria-label="Schließen">Fertig</button>
+    </div>
+    <div id="pageGrid" class="page-grid"></div>
+    <div class="sheet-actions">
+      <button id="btnMakePdf" class="act" type="button">PDF</button>
+      <button id="btnSharePdf" class="act" type="button">Teilen</button>
+      <button id="btnPrint" class="act" type="button">Drucken</button>
+      <button id="btnOcr" class="act" type="button" title="Text erkennen, als TXT speichern und als unsichtbare Textebene ins PDF legen">Text</button>
+    </div>
+  </div>
+</div>
+
+<div id="busy" class="busy" hidden>
+  <div class="busy-box">
+    <div id="busyBar" class="busy-bar"><i></i></div>
+    <p id="busyText" class="busy-text">Wird verarbeitet</p>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="vendor/jspdf.umd.min.js"></script>
+<script src="js/vision.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

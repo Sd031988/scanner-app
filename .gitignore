@@ -1,0 +1,11 @@
+# Logs
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.suo

@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Einbaubeispiel Scanner-Aufbereitung</title>
+<style>
+  :root{--bg:#0b1113;--ink:#e8f3ee;--green:#2fe08a;--line:#1e2c2a}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,sans-serif}
+  header{padding:12px 14px;border-bottom:1px solid var(--line)}
+  h1{font-size:16px;margin:0 0 4px}
+  .note{font-size:12px;color:#8fa8a0}
+  #stage{position:relative;margin:12px;background:#000;min-height:44vh;border-radius:10px;overflow:hidden;touch-action:none}
+  #stage canvas{position:absolute;inset:0;width:100%;height:100%}
+  #live{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+  .bar{display:flex;flex-wrap:wrap;gap:8px;padding:0 12px 12px}
+  button{background:#16211f;color:var(--ink);border:1px solid var(--line);border-radius:9px;padding:10px 13px;font-size:14px;cursor:pointer}
+  button.p{background:var(--green);color:#04231a;border-color:var(--green);font-weight:600}
+  button[disabled]{opacity:.4;cursor:default}
+  #strip{display:flex;gap:8px;padding:0 12px 12px;overflow-x:auto}
+  #strip button{flex:0 0 auto;padding:6px 10px;font-size:12px}
+  #strip button.on{background:var(--green);color:#04231a;border-color:var(--green)}
+  #strip canvas{display:block;width:46px;height:62px;margin-bottom:4px;border-radius:4px;background:#000}
+  #strip button{display:flex;flex-direction:column;align-items:center}
+  #pages{display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:8px;padding:0 12px 12px}
+  #pages img{width:100%;border-radius:5px;background:#000;display:block}
+  #pages figure{margin:0}
+  #pages figcaption{font-size:11px;color:#8fa8a0;padding-top:3px}
+  #msg{padding:0 12px 16px;font-size:13px;color:var(--green);min-height:1.4em}
+  code{background:#16211f;padding:1px 4px;border-radius:4px;font-size:13px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Einbaubeispiel: Aufbereitung aus dem Scanner</h1>
+  <p class="note">Zeigt exakt die Kette aus <code>vision.js</code>. Diese Datei ist ein Wegwerf-Ordner und kann nach dem Test gelöscht werden.</p>
+</header>
+
+<div id="stage">
+  <video id="live" playsinline muted autoplay></video>
+  <canvas id="view"></canvas>
+</div>
+
+<div class="bar">
+  <button id="cam" class="p">Kamera starten</button>
+  <button id="find" disabled>Ecken suchen</button>
+  <button id="ok" disabled class="p">Seite übernehmen</button>
+  <button id="reset" disabled>Zurücksetzen</button>
+</div>
+
+<div id="strip"></div>
+
+<div class="bar">
+  <button id="pdf" disabled>Als PDF speichern</button>
+  <button id="clearAll">Alle Seiten löschen</button>
+</div>
+
+<div id="pages"></div>
+<p id="msg"></p>
+
+<script src="vision.js"></script>
+<script src="jspdf.umd.min.js"></script>
+<script>
+/*
+  EINBAU IN EINE EIGENE HTML-APP
+  =================================
+  1. vision.js neben die HTML-Datei legen und per
+         <script src="vision.js">
+     einbinden (schliessenden Tag nicht hier hineinkopieren).
+  2. Diese Datei als Vorlage nehmen.
+
+  Der eigentliche Kern ist ausdrücklich nur dieser Block:
+
+     const quad = Vision.detectQuad(gray, sw, sh);   // Erkennung auf ~420px Breite
+     const size = Vision.outputSize(quad, 2400);      // Zielgroesse in Bildpunkten
+     const page = Vision.warp(rgba, w, h, quad, size.w, size.h);   // ENTZERREN
+     const out  = Vision.applyFilter(page, size.w, size.h, "clear"); // FILTERN
+
+  Reihenfolge nicht ändern: der Filter läuft NACH dem Zuschneiden.
+  Vorher verdirbt der dunkle Tisch um das Blatt die Helligkeitsschaetzung.
+*/
+
+const $ = (id) => document.getElementById(id);
+
+const state = {
+  frame: null,        // { rgba, w, h } des aufgenommenen Einzelbildes
+  quad: null,         // Float32Array(8) in Bildkoordinaten
+  filter: "clear",
+  pages: [],
+  fit: { s: 1, ox: 0, oy: 0 }
+};
+
+// ---------------------------------------------------------------- Kamera
+
+async function startCamera() {
+  const v = $("live");
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: { ideal: "environment" }, width: { ideal: 4000 }, height: { ideal: 3000 } },
+    audio: false
+  });
+  v.srcObject = stream;
+  await v.play();
+  $("cam").textContent = "Kamera stoppen";
+  $("find").disabled = false;
+}
+
+function stopCamera() {
+  const v = $("live");
+  if (v.srcObject) v.srcObject.getTracks().forEach((t) => t.stop());
+  v.srcObject = null;
+}
+
+// ------------------------------------------------------- Einzelbild holen
+
+function grabFrame() {
+  const v = $("live");
+  const w = v.videoWidth, h = v.videoHeight;
+  if (!w || !h) return null;
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(v, 0, 0, w, h);
+  return { rgba: ctx.getImageData(0, 0, w, h).data, w, h };
+}
+
+// ------------------------------------------------------------- Ecken finden
+
+function detectFromRGBA(rgba, w, h) {
+  // Genau wie im Scanner: klein rechnen, dann zurueckskalieren.
+  const sw = Math.min(420, w);
+  const sh = Math.max(1, Math.round((h / w) * sw));
+  const small = document.createElement("canvas");
+  small.width = sw;
+  small.height = sh;
+  const sctx = small.getContext("2d", { willReadFrequently: true });
+
+  const full = document.createElement("canvas");
+  full.width = w;
+  full.height = h;
+  full.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(rgba), w, h), 0, 0);
+  sctx.drawImage(full, 0, 0, sw, sh);
+
+  const d = sctx.getImageData(0, 0, sw, sh);
+  const g = Vision.luma(d.data, sw, sh);
+  const q = Vision.detectQuad(g, sw, sh);
+  if (!q) return null;
+
+  const kx = w / sw, ky = h / sh;
+  const out = new Float32Array(8);
+  for (let i = 0; i < 4; i++) {
+    out[i * 2] = q[i * 2] * kx;
+    out[i * 2 + 1] = q[i * 2 + 1] * ky;
+  }
+  return out;
+}
+
+// --------------------------------------------------------------- Anzeige
+
+function layout() {
+  const f = state.frame;
+  const stage = $("stage");
+  const sw = stage.clientWidth, sh = stage.clientHeight;
+  if (!f) return;
+  const s = Math.min(sw / f.w, sh / f.h);
+  state.fit = { s, ox: (sw - f.w * s) / 2, oy: (sh - f.h * s) / 2 };
+  draw();
+}
+
+function draw() {
+  const f = state.frame;
+  const cv = $("view");
+  const ctx = cv.getContext("2d");
+  cv.width = $("stage").clientWidth;
+  cv.height = $("stage").clientHeight;
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  if (!f) return;
+
+  const src = document.createElement("canvas");
+  src.width = f.w;
+  src.height = f.h;
+  src.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(f.rgba), f.w, f.h), 0, 0);
+
+  let shown = src;
+  if (state.quad) {
+    shown = renderPreview(state.quad, 900);
+  }
+  const { s, ox, oy } = state.fit;
+  ctx.drawImage(shown, ox, oy, f.w * s, f.h * s);
+
+  if (!state.quad) return;
+  const p = [];
+  for (let i = 0; i < 4; i++) p.push([ox + state.quad[i * 2] * s, oy + state.quad[i * 2 + 1] * s]);
+  ctx.strokeStyle = "#2fe08a";
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.moveTo(p[0][0], p[0][1]);
+  for (let i = 1; i < 4; i++) ctx.lineTo(p[i][0], p[i][1]);
+  ctx.closePath();
+  ctx.stroke();
+  ctx.fillStyle = "#2fe08a";
+  for (let i = 0; i < 4; i++) {
+    ctx.beginPath();
+    ctx.arc(p[i][0], p[i][1], 11, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+// Vorschau: entzerren + filtern, klein gehalten fuer schnelle Reaktion.
+function renderPreview(quad, maxDim) {
+  const f = state.frame;
+  const size = Vision.outputSize(quad, maxDim);
+  const rect = Vision.warp(f.rgba, f.w, f.h, quad, size.w, size.h);
+  if (!rect) return null;
+  const filtered = Vision.applyFilter(rect, size.w, size.h, state.filter, {});
+  const c = document.createElement("canvas");
+  c.width = size.w;
+  c.height = size.h;
+  c.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(filtered), size.w, size.h), 0, 0);
+  return c;
+}
+
+// ---------------------------------------------------------- Ecken ziehen
+
+const stage = $("stage");
+stage.addEventListener("pointerdown", (ev) => {
+  if (!state.quad || !state.frame) return;
+  const r = stage.getBoundingClientRect();
+  const x = ev.clientX - r.left, y = ev.clientY - r.top;
+  const { s, ox, oy } = state.fit;
+  let best = -1, bestD = 1e9;
+  for (let i = 0; i < 4; i++) {
+    const cx = ox + state.quad[i * 2] * s, cy = oy + state.quad[i * 2 + 1] * s;
+    const d = (cx - x) * (cx - x) + (cy - y) * (cy - y);
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  if (bestD > 40 * 40) return;
+  stage.setPointerCapture(ev.pointerId);
+  const move = (e2) => {
+    state.quad[best * 2] = Math.max(0, Math.min(state.frame.w, (e2.clientX - r.left - ox) / s));
+    state.quad[best * 2 + 1] = Math.max(0, Math.min(state.frame.h, (e2.clientY - r.top - oy) / s));
+    draw();
+  };
+  const up = () => {
+    stage.removeEventListener("pointermove", move);
+    stage.removeEventListener("pointerup", up);
+    drawStrip();
+  };
+  stage.addEventListener("pointermove", move);
+  stage.addEventListener("pointerup", up);
+});
+
+// -------------------------------------------------------------- Seiten
+
+function acceptPage() {
+  const f = state.frame;
+  if (!f || !state.quad) return;
+
+  // Hier ist der Kern. Genau diese vier Schritte erzeugen das gute Ergebnis.
+  const size = Vision.outputSize(state.quad, 2400);
+  const page = Vision.warp(f.rgba, f.w, f.h, state.quad, size.w, size.h);
+  if (!page) { $("msg").textContent = "Zuschneiden fehlgeschlagen"; return; }
+  const out = Vision.applyFilter(page, size.w, size.h, state.filter, {});
+
+  const c = document.createElement("canvas");
+  c.width = size.w;
+  c.height = size.h;
+  c.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(out), size.w, size.h), 0, 0);
+
+  state.pages.push({ src: c.toDataURL("image/jpeg", 0.92) });
+  state.quad = null;
+  renderPages();
+  $("msg").textContent = "Seite übernommen";
+}
+
+// -------------------------------------------------------------- Filter
+
+function drawStrip() {
+  const strip = $("strip");
+  strip.innerHTML = "";
+  const f = state.frame;
+  if (!f) return;
+  for (const flt of Vision.FILTERS) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = state.filter === flt.id ? "on" : "";
+    const c = document.createElement("canvas");
+    c.width = 92;
+    c.height = 124;
+    const p = renderPreview(state.quad || fallbackQuad(f), 240);
+    if (p) c.getContext("2d").drawImage(p, 0, 0, 92, 124);
+    b.appendChild(c);
+    b.appendChild(document.createTextNode(flt.label));
+    if (flt.hint) b.title = flt.hint;
+    b.onclick = () => {
+      state.filter = flt.id;
+      drawStrip();
+      draw();
+    };
+    strip.appendChild(b);
+  }
+}
+
+function fallbackQuad(f) {
+  const m = 0.06;
+  return Float32Array.from([
+    f.w * m, f.h * m, f.w * (1 - m), f.h * m,
+    f.w * (1 - m), f.h * (1 - m), f.w * m, f.h * (1 - m)
+  ]);
+}
+
+function renderPages() {
+  const box = $("pages");
+  box.innerHTML = "";
+  state.pages.forEach((p, i) => {
+    const fig = document.createElement("figure");
+    const img = document.createElement("img");
+    img.src = p.src;
+    const cap = document.createElement("figcaption");
+    cap.textContent = "Seite " + (i + 1);
+    fig.appendChild(img);
+    fig.appendChild(cap);
+    box.appendChild(fig);
+  });
+  $("pdf").disabled = !state.pages.length;
+}
+
+// ----------------------------------------------------------------- PDF
+
+// Unsichtbare Textebene: legt erkannten Text deckungsgleich ueber das Bild,
+// damit das PDF durchsuchbar und der Text kopierbar wird, ohne dass sich
+// das Bild aendert. Erwartet words = [{text,x0,y0,x1,y1}] plus ocrW/ocrH.
+function addTextLayer(doc, page, geom) {
+  const words = page.words && page.words.length ? page.words : null;
+  if (!words && !page.text) return;
+  doc.setFont("helvetica", "normal");
+  if (!words) {
+    doc.setFontSize(9);
+    doc.text(String(page.text), geom.dx + 1, geom.dy + 4, {
+      renderingMode: "invisible",
+      maxWidth: Math.max(10, geom.dw - 2)
+    });
+    return;
+  }
+  const sx = geom.dw / Math.max(1, page.ocrW || geom.ow);
+  const sy = geom.dh / Math.max(1, page.ocrH || geom.oh);
+  for (const wd of words) {
+    const x = geom.dx + wd.x0 * sx;
+    const y = geom.dy + wd.y1 * sy;
+    const boxW = Math.max(0.2, (wd.x1 - wd.x0) * sx);
+    const boxH = Math.max(0.2, (wd.y1 - wd.y0) * sy);
+    doc.setFontSize(Math.max(1, Math.min(200, (boxH * 72) / 25.4)));
+    const natural = doc.getTextWidth(wd.text);
+    const hs = natural > 0.01 ? Math.max(0.2, Math.min(4, boxW / natural)) : 1;
+    doc.text(wd.text, x, y, { renderingMode: "invisible", horizontalScale: hs });
+  }
+}
+
+async function makePdf() {
+  const { jsPDF } = window.jspdf;
+  let doc = null;
+  for (let i = 0; i < state.pages.length; i++) {
+    const p = state.pages[i];
+    const img = await new Promise((res, rej) => {
+      const im = new Image();
+      im.onload = () => res(im);
+      im.onerror = rej;
+      im.src = p.src;
+    });
+    const landscape = img.naturalWidth > img.naturalHeight;
+    if (!doc) doc = new jsPDF({ unit: "mm", format: "a4", orientation: landscape ? "landscape" : "portrait" });
+    else doc.addPage("a4", landscape ? "landscape" : "portrait");
+    const pw = doc.internal.pageSize.getWidth(), ph = doc.internal.pageSize.getHeight();
+    const m = 7;
+    const s = Math.min((pw - 2 * m) / img.naturalWidth, (ph - 2 * m) / img.naturalHeight);
+    const geom = {
+      dx: (pw - img.naturalWidth * s) / 2, dy: (ph - img.naturalHeight * s) / 2,
+      dw: img.naturalWidth * s, dh: img.naturalHeight * s,
+      ow: img.naturalWidth, oh: img.naturalHeight
+    };
+    doc.addImage(p.src, "JPEG", geom.dx, geom.dy, geom.dw, geom.dh, undefined, "FAST");
+    addTextLayer(doc, p, geom);
+  }
+  const blob = doc.output("blob");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "scan.pdf";
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+
+// -------------------------------------------------------------- Bedienung
+
+$("cam").onclick = async () => {
+  if ($("live").srcObject) {
+    stopCamera();
+    $("cam").textContent = "Kamera starten";
+    return;
+  }
+  try {
+    await startCamera();
+  } catch (e) {
+    $("msg").textContent = "Kamera nicht verfügbar (HTTPS oder localhost nötig)";
+  }
+};
+
+$("find").onclick = () => {
+  $("msg").textContent = "Ecken werden gesucht";
+  const f = grabFrame();
+  if (!f) return;
+  state.frame = f;
+  $("live").style.display = "none";
+  const q = detectFromRGBA(f.rgba, f.w, f.h);
+  state.quad = q || fallbackQuad(f);
+  $("ok").disabled = false;
+  $("reset").disabled = false;
+  layout();
+  drawStrip();
+  $("msg").textContent = q
+    ? "Ecken erkannt. Griffe ziehen, dann übernehmen."
+    : "Keine Ecken gefunden – Rahmen vorgegeben. Griffe auf das Blatt ziehen.";
+  $("find").textContent = "Neu aufnehmen";
+};
+
+$("ok").onclick = acceptPage;
+
+$("reset").onclick = () => {
+  state.quad = null;
+  state.frame = null;
+  $("ok").disabled = true;
+  $("reset").disabled = true;
+  $("live").style.display = "";
+  $("strip").innerHTML = "";
+  layout();
+  $("msg").textContent = "";
+};
+
+$("pdf").onclick = () => makePdf();
+$("clearAll").onclick = () => {
+  state.pages = [];
+  renderPages();
+};
+
+window.addEventListener("resize", layout);
+
+if (!window.isSecureContext) {
+  $("msg").textContent = "Achtung: Kamera braucht HTTPS oder localhost.";
+}
+</script>
+</body>
+</html>

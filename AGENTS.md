@@ -6,7 +6,7 @@ Projektkontext für OpenCode. Lesen, bevor geändert wird.
 
 `Dokumentenscanner` – installierbare Web-App (PWA) ausschließlich zum Scannen von Papierdokumenten, Rechnungen und Quittungen. Reine statische Dateien: **kein Build, kein Paketmanager, keine Framework-Abhängigkeiten.** Alles unter `vendor/` liegt lokal, damit die App offline, ohne CDN und ohne Cloud-Zugriff funktioniert.
 
-Die Kamera ist der erste und einzige Einstieg. Keine Startseite, keine Tabs, keine Dashboards, keine Tabellen, keine Formulare.
+Die Kamera ist der erste Einstieg, daneben der Bild-Import (Knopf unten rechts; ohne Kamera als Hinweis in der Mitte). Keine Startseite, keine Tabs, keine Dashboards, keine Tabellen, keine Formulare.
 
 ## Starten
 
@@ -21,7 +21,7 @@ Dann `http://localhost:8123`. Die Kamera funktioniert nur über HTTPS oder `loca
 
 | Datei | Inhalt |
 | --- | --- |
-| `index.html` | App-Shell: Kamerabildschirm, Review-Bildschirm, Seiten-Sheet, Busy, Toast |
+| `index.html` | App-Shell: Kamerabildschirm mit Import, Review-Bildschirm, Seiten-Sheet mit Dateiname, Text-Sheet, Busy, Toast |
 | `js/vision.js` | reine Bildverarbeitung, IIFE mit `window.Vision` **und** `module.exports` für Node-Tests |
 | `js/app.js` | gesamte App-Logik in einem IIFE, kein Export |
 | `app.css` | Styling, dunkel, randlos, grüne Bedienelemente, Safe-Area-Insets |
@@ -58,7 +58,7 @@ Der Test deckt Kantenerkennung, Eckengenauigkeit, Reihenfolge, Entzerren, Textze
 - **Die Review-Vorschau wird beim Ziehen nicht neu entzerrt.** Die Abbildung Vorschau↔Original hängt am Quad, mit dem die Vorschau gebaut wurde (`state.preview.quad`), nicht am sich ändernden `state.editing.quad`. Sonst driftet der Griff.
 - **`page.src` enthält schon den gewählten Filter.** Export und OCR wenden ihn nicht noch einmal an, sonst wird doppelt gefiltert.
 - **Schattenkorrektur ist zweistufig.** `illuminationField` schätzt den Papierton als 80 %-Perzentil pro Kachel (nicht als Maximum: Max-Pooling erzeugt Gitterrauschen, das die Binarisierung flackern lässt), glättet das Feld mit `boxBlur` und interpoliert bilinear. `removeShadow` liefert `g / bg`, nicht `bg` selbst – wer `lum` als Nenner nimmt, entfernt den Lichtfleck nicht.
-- **„Original" ist nur Belichtungskorrektur, kein Durchgang.** In `applyFilter` teilt der Zweig für `original` jeden Kanal durch das Papiertonfeld, ohne Sättigung, Konstante oder Tonwertkurve; bei gleichmäßigem Licht ist das exakt linear. Wer es zum echten Durchgang machen will, muss auch `applyPreviewFilter` (kein früher `return view`) und `rebuild` in `js/app.js` mitziehen, sonst weichen Vorschau und Export auseinander.
+- **„Original" ist ein echter Durchgang** (seit Commit b17fbc8): `applyFilter` kopiert nur, Entzerren und Zuschnitt bleiben.
 - **Der Modus `clear` ist der ClearScan-Ersatz und rechnet mit Deckkraft, nicht mit Stufen.** `cov` ist 0 auf Papier und 1 auf Tinte, alles dazwischen bleibt grau. Eine harte Schwelle (`applyLevels`, wie bei `document`) erzeugt nur 0 und 255 und damit gezackte Kanten – das ist genau der Unterschied zu Adobe ClearScan.
 - **Der `floor`-Parameter in `clear` ist kein Schönheitswert.** Ohne ihn schlägt das Sensorrauschen des Papiers als helles Grau von 240–250 durch und die weiße Fläche ist nur zu ~74 % weiß. Mit `floor` 0.08 sind es ~99 %.
 - **`despeckle` arbeitet flächen-, nicht pixelweise.** Es sucht zusammenhängende Bereiche über `cov > 0.5` und löscht nur solche mit Fläche `<= speckArea` **und** Bounding-Box-Kantenlänge `<= speckSize`. Ein Medianfilter wäre falsch, er würde die Punzen und dünnen Striche von `i`, `j`, `:` mitfressen.
@@ -71,11 +71,15 @@ Der Test deckt Kantenerkennung, Eckengenauigkeit, Reihenfolge, Entzerren, Textze
 - `clampBox` und `applyPreviewFilter` sind gepuffert, weil sie sonst pro `pointermove` ein Bild neu in ein Canvas laden.
 - Tesseract lädt seine Sprachdaten erst beim ersten Texterkennen. Deshalb stehen sie nicht in `SHELL`, sondern werden nur zur Laufzeit gecacht.
 - Der Service Worker ist in `js/app.js` registriert; nach einem Feature-Wechsel `VERSION` erhöhen, sonst liefert der alte Cache die alte App aus.
-- Seiten liegen nur in `state.pages` (Arbeitsspeicher). Ein Neuladen löscht sie.
+- Seiten liegen in `state.pages` und werden über `persist()` (entprellt) komplett in IndexedDB `dokumentenscanner` geschrieben (Store `pages` mit `order`, Store `meta` mit `docName`). Jede Änderung an Seiten oder Reihenfolge muss `persist()` aufrufen. `restore()` hängt beim Start gespeicherte Seiten *vor* bereits neu aufgenommene.
+- **Seiten über `id` ansprechen, nie über einen beim Rendern gemerkten Index.** Nach dem Umsortieren stimmen Closure-Indizes nicht mehr (das war der Lösch-Fehler). `indexOfPage(page)` benutzen.
+- **`openReview` muss erst `setScreen("review")` und dann `rebuild()` aufrufen.** Sonst misst `layout()` einen unsichtbaren Bildschirm mit Breite 0 und die Vorschau bleibt leer.
+- **`detectQuad` liegt systematisch 1–2 Arbeitspixel außerhalb des Blatts.** `detectFromRGBA` ruft deshalb `refineQuad` auf: pro Kante Suche des stärksten Helligkeitssprungs entlang der Normalen in voller Auflösung, Geradenanpassung mit Ausreißer-Verwurf, Ecken als Schnittpunkte. Beim Übernehmen wird ein erkanntes Quad zusätzlich um 0,8 % eingezogen (`shrinkQuad`, nur wenn `editing.trim`). Manuell gesetzte bzw. Nachbearbeitungs-Quads werden nicht eingezogen, sonst schrumpft eine Seite bei jedem Nachbearbeiten.
+- Die Live-Erkennung im Kamerabild verwendet `refineQuad` nicht (zu teuer pro Frame).
 
 ## Bekannte Lücken
 
-Keine dauerhafte Speicherung, keine Synchronisierung zwischen Geräten, keine native App. Die Texterkennung ist nicht im Browser getestet, weil die Testumgebung keine Kamera und kein Bildmaterial aus dem echten Einsatz hat.
+Keine Synchronisierung zwischen Geräten, keine native App, kein PDF-Import. Texterkennung nur `deu` + `eng`. Echte Handykamera, Blitz, Zoom und Teilen-Dialog sind nicht automatisiert getestet.
 
 Adobes echtes ClearScan ersetzt die Bitmap-Buchstaben durch geglättete Vektor-Konturen mit eingebetteter Schnittdatei. Das ist hier nicht nachgebaut: es bräuchte eine Glyphenerkennung samt Schrifterzeugung. Der Modus `clear` bildet nur das *Aussehen* nach (weißes Papier, dunkler Text, weiche Kanten, staubfrei) – vergrößert bleibt der Text Bitmap.
 
@@ -83,4 +87,4 @@ Adobes echtes ClearScan ersetzt die Bitmap-Buchstaben durch geglättete Vektor-K
 
 ## Stand
 
-Geprüft am 2026-10-05: `node --check` für alle Skripte, vollständige Bildverarbeitungs-Testsuite grün, Filtertestsuite grün (Lichtfleck 22.9 → 0.0 Dokument / 0.9 Farb / 0.7 Original, Papier in allen vier Ecken 0 % schwarz, Original bei gleichmäßigem Licht exakt linear L1 0.0000 und im Fleckfall L1 0.002 gegen eine unabhängige Flächenkorrektur), ClearScan-Suite grün (Papier 253..255 und 98.9 % reinweiß, 409 Staubpunkte → 0, 78449 Grauton-Pixel an den Kanten mit 36 Rampenstufen, Text mittel 35.4, 103 ms), PDF-Textschicht im unkomprimierten Contentstream geprüft (`3 Tr`, `Tz`, WinAnsi), Icons per Pixelanalyse, Service-Worker-Dateiliste gegen Dateisystem. Kamerapfade und OCR-Laufzeit sind im Browser noch nicht durchgetestet; die Texterkennung wurde nur bis zur Wortboxen-Sammlung ohne echtes Tesseract geprüft.
+Geprüft am 2026-10-06 in Chromium (Playwright) mit simulierter Kamera (`--use-file-for-fake-video-capture`, schräg fotografierte Rechnung) und ohne Kamera: Live-Erkennung, Auslösen, Filter, Übernehmen, Umsortieren + Löschen der richtigen Seite, Drehen, Dateiname, Persistenz über Neuladen, „Neu“ mit Sicherheitsabfrage, PDF, Texterkennung mit echtem Tesseract im Browser, Textansicht/Kopieren/TXT, durchsuchbares PDF (`pdftotext`), Bild-Import (mehrere, mit und ohne Blatt), Nachbearbeiten aus der Seitenliste, PDF-Ränder ohne Hintergrundstreifen, Konsole fehlerfrei. `refineQuad` gegen bekannte Ecken: Abweichung ≤ 3 px bei 1920 px Bildbreite (vorher bis 19 px).

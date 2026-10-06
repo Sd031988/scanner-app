@@ -26,7 +26,17 @@
     busy: el("busy"),
     busyBar: el("busyBar"),
     busyText: el("busyText"),
-    toast: el("toast")
+    toast: el("toast"),
+    importBtn: el("btnImport"),
+    importBig: el("btnImportBig"),
+    fileInput: el("fileInput"),
+    noCam: el("noCam"),
+    noCamText: el("noCamText"),
+    docName: el("docName"),
+    newDoc: el("btnNewDoc"),
+    textSheet: el("textSheet"),
+    textOut: el("textOut"),
+    textNote: el("textNote")
   };
 
   const state = {
@@ -48,7 +58,10 @@
     pinchStart: 0,
     drag: null,
     tesseract: null,
-    hintShown: false
+    hintShown: false,
+    importQueue: [],
+    docName: "",
+    persistWarned: false
   };
 
   let toastTimer = null;
@@ -95,6 +108,95 @@
       i.src = src;
     });
 
+  const DB_NAME = "dokumentenscanner";
+  let dbPromise = null;
+  let saveTimer = null;
+
+  function openDb() {
+    if (dbPromise) return dbPromise;
+    dbPromise = new Promise((res, rej) => {
+      if (!("indexedDB" in window)) return rej(new Error("kein Speicher"));
+      const r = indexedDB.open(DB_NAME, 1);
+      r.onupgradeneeded = () => {
+        const db = r.result;
+        if (!db.objectStoreNames.contains("pages")) db.createObjectStore("pages", { keyPath: "id" });
+        if (!db.objectStoreNames.contains("meta")) db.createObjectStore("meta");
+      };
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+    return dbPromise;
+  }
+
+  function storedPage(p, order) {
+    return {
+      id: p.id, src: p.src, w: p.w, h: p.h, filter: p.filter, thumb: p.thumb,
+      text: p.text == null ? null : p.text, words: p.words || null,
+      ocrW: p.ocrW || 0, ocrH: p.ocrH || 0, order
+    };
+  }
+
+  function persist() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(writeAll, 250);
+  }
+
+  async function writeAll() {
+    try {
+      const db = await openDb();
+      await new Promise((res, rej) => {
+        const tx = db.transaction(["pages", "meta"], "readwrite");
+        const store = tx.objectStore("pages");
+        store.clear();
+        state.pages.forEach((p, i) => store.put(storedPage(p, i)));
+        tx.objectStore("meta").put(state.docName, "docName");
+        tx.oncomplete = () => res();
+        tx.onerror = () => rej(tx.error);
+        tx.onabort = () => rej(tx.error);
+      });
+    } catch (e) {
+      if (!state.persistWarned) {
+        state.persistWarned = true;
+        toast("Speichern auf dem Gerät nicht möglich. Seiten bleiben nur bis zum Schließen.", 5000);
+      }
+    }
+  }
+
+  async function restore() {
+    try {
+      const db = await openDb();
+      const [pages, name] = await new Promise((res, rej) => {
+        const tx = db.transaction(["pages", "meta"], "readonly");
+        const a = tx.objectStore("pages").getAll();
+        const b = tx.objectStore("meta").get("docName");
+        tx.oncomplete = () => res([a.result || [], b.result]);
+        tx.onerror = () => rej(tx.error);
+      });
+      pages.sort((x, y) => x.order - y.order);
+      const restored = pages.map((p) => {
+        const copy = Object.assign({}, p);
+        delete copy.order;
+        return copy;
+      });
+      state.pages = restored.concat(state.pages);
+      if (typeof name === "string" && name.trim()) state.docName = name;
+    } catch (e) {}
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+  }
+
+  function defaultDocName() {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, "0");
+    return `Scan ${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()}`;
+  }
+
+  function fileBase() {
+    const raw = String(state.docName || "").trim() || defaultDocName();
+    return raw.replace(/[\\/:*?"<>|\u0000-\u001f]+/g, "-").replace(/\s+/g, " ").slice(0, 80) || "scan";
+  }
+
+  const indexOfPage = (page) => state.pages.findIndex((p) => p.id === page.id);
+
   const toDataUrl = (rgba, w, h, q) => clampBox(rgba, w, h).toDataURL("image/jpeg", q == null ? 0.92 : q);
 
   const insetQuad = (w, h, m) => [
@@ -120,7 +222,7 @@
       out[i * 2] = q[i * 2] * kx;
       out[i * 2 + 1] = q[i * 2 + 1] * ky;
     }
-    return out;
+    return Vision.refineQuad(rgba, w, h, out, Math.round(3 * Math.max(kx, ky) + 2));
   }
 
   function coverMap(vw, vh, sw, sh) {
@@ -137,8 +239,19 @@
     ui.stage.style.transform = `translate3d(${state.panX}px, ${state.panY}px, 0) scale(${state.zoom})`;
   }
 
+  function showNoCamera(reason) {
+    ui.noCamText.textContent = reason;
+    ui.noCam.hidden = false;
+  }
+
   async function startCamera() {
     if (state.stream) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showNoCamera(window.isSecureContext
+        ? "Dieser Browser gibt keine Kamera frei. Fotos oder Bilder kannst du trotzdem importieren."
+        : "Die Kamera geht nur über HTTPS oder localhost. Fotos oder Bilder kannst du trotzdem importieren.");
+      return;
+    }
     try {
       state.stream = await navigator.mediaDevices.getUserMedia({
         video: {
@@ -155,10 +268,15 @@
         const caps = state.track.getCapabilities ? state.track.getCapabilities() : {};
         if (caps.torch) ui.torch.hidden = false;
       } catch (e) {}
+      ui.noCam.hidden = true;
       state.lastDetect = 0;
       loop();
     } catch (e) {
-      toast("Kamera nicht verfügbar: " + String(e.message || e).slice(0, 60), 5000);
+      state.stream = null;
+      const denied = e && (e.name === "NotAllowedError" || e.name === "SecurityError");
+      showNoCamera(denied
+        ? "Der Kamerazugriff wurde nicht erlaubt. Fotos oder Bilder kannst du trotzdem importieren."
+        : "Keine Kamera gefunden. Fotos oder Bilder vom Gerät importieren und wie einen Scan bearbeiten.");
     }
   }
 
@@ -377,9 +495,9 @@
     const ctx = c.getContext("2d", { willReadFrequently: true });
     ctx.drawImage(v, 0, 0, w, h);
     const d = ctx.getImageData(0, 0, w, h);
-    const quad = detectFromRGBA(d.data, w, h, 420) || insetQuad(w, h, 0.06);
+    const found = detectFromRGBA(d.data, w, h, 420);
     setScreen("review");
-    openReview({ rgba: d.data, w, h }, quad, null);
+    openReview({ rgba: d.data, w, h }, found || insetQuad(w, h, 0.06), null, !!found);
   }
 
   function rectify(quad, maxDim) {
@@ -393,16 +511,16 @@
     return [0, 0, view.w, 0, view.w, view.h, 0, view.h];
   }
 
-  function openReview(base, quad, pageId) {
-    state.editing = { base, quad: Float32Array.from(quad), pageId, filter: "original" };
+  function openReview(base, quad, pageId, trim) {
+    state.editing = { base, quad: Float32Array.from(quad), pageId, filter: "original", trim: !!trim };
     if (pageId != null) {
       const p = state.pages.find((x) => x.id === pageId);
       if (p) state.editing.filter = p.filter;
     }
     state.drag = null;
     ui.loupe.hidden = true;
-    rebuild();
     setScreen("review");
+    rebuild();
   }
 
   function rebuild() {
@@ -643,10 +761,11 @@
 
   el("btnAuto").addEventListener("click", () => {
     const b = state.editing.base;
-    const q = detectFromRGBA(b.rgba, b.w, b.h, 460) || insetQuad(b.w, b.h, 0.06);
-    state.editing.quad = Float32Array.from(q);
+    const q = detectFromRGBA(b.rgba, b.w, b.h, 460);
+    state.editing.quad = Float32Array.from(q || insetQuad(b.w, b.h, 0.06));
+    state.editing.trim = !!q;
     rebuild();
-    toast("Kanten neu erkannt");
+    toast(q ? "Kanten neu erkannt" : "Keine Kanten gefunden, bitte Ecken ziehen");
   });
 
   el("btnRotate").addEventListener("click", () => {
@@ -655,21 +774,27 @@
     rebuild();
   });
 
+  async function afterReview() {
+    if (state.importQueue.length && (await openNextImport())) return;
+    setScreen("camera");
+    startCamera();
+  }
+
   el("btnReviewBack").addEventListener("click", () => {
     state.editing = null;
     state.view = null;
     state.preview = null;
     ui.loupe.hidden = true;
-    setScreen("camera");
-    startCamera();
+    afterReview();
   });
 
   el("btnAccept").addEventListener("click", async () => {
     const e = state.editing;
     if (!e) return;
     busy("Seite wird übernommen", 0.3);
-    const size = Vision.outputSize(e.quad, 2400);
-    const rgba = Vision.warp(e.base.rgba, e.base.w, e.base.h, e.quad, size.w, size.h);
+    const quad = e.trim ? Vision.shrinkQuad(e.quad, 0.008) : e.quad;
+    const size = Vision.outputSize(quad, 2400);
+    const rgba = Vision.warp(e.base.rgba, e.base.w, e.base.h, quad, size.w, size.h);
     busyHide();
     if (!rgba) { toast("Zuschneiden fehlgeschlagen"); return; }
     const out = Vision.applyFilter(rgba, size.w, size.h, e.filter, {});
@@ -684,6 +809,7 @@
         p.filter = e.filter;
         p.thumb = thumb;
         p.text = null;
+        p.words = null;
       }
     } else {
       state.pages.push({
@@ -701,9 +827,9 @@
     state.editing = null;
     state.view = null;
     state.preview = null;
-    setScreen("camera");
     renderCounts();
-    startCamera();
+    persist();
+    afterReview();
   });
 
   function makeThumb(src) {
@@ -736,12 +862,51 @@
     }
   }
 
-  function openSheet() {
-    renderGrid();
-    ui.pagesSheet.hidden = false;
+  function updateSheetButtons() {
     const empty = !state.pages.length;
     ["btnMakePdf", "btnSharePdf", "btnPrint", "btnOcr"].forEach((id) => (el(id).disabled = empty));
   }
+
+  function openSheet() {
+    renderGrid();
+    ui.docName.value = state.docName || defaultDocName();
+    ui.pagesSheet.hidden = false;
+    updateSheetButtons();
+  }
+
+  ui.docName.addEventListener("input", () => {
+    state.docName = ui.docName.value;
+    persist();
+  });
+
+  let newDocArmed = 0;
+  let newDocTimer = null;
+  const resetNewDocButton = () => {
+    newDocArmed = 0;
+    ui.newDoc.textContent = "Neu";
+    ui.newDoc.classList.remove("danger");
+  };
+
+  ui.newDoc.addEventListener("click", () => {
+    if (state.pages.length && Date.now() - newDocArmed > 3000) {
+      newDocArmed = Date.now();
+      ui.newDoc.textContent = "Alle Seiten löschen?";
+      ui.newDoc.classList.add("danger");
+      clearTimeout(newDocTimer);
+      newDocTimer = setTimeout(resetNewDocButton, 3000);
+      return;
+    }
+    clearTimeout(newDocTimer);
+    resetNewDocButton();
+    state.pages = [];
+    state.docName = defaultDocName();
+    ui.docName.value = state.docName;
+    renderGrid();
+    renderCounts();
+    updateSheetButtons();
+    persist();
+    toast("Neues Dokument");
+  });
 
   const closeSheet = () => (ui.pagesSheet.hidden = true);
 
@@ -785,9 +950,22 @@
       del.textContent = "✕";
       del.addEventListener("click", (ev) => {
         ev.stopPropagation();
-        state.pages.splice(i, 1);
+        const k = indexOfPage(page);
+        if (k < 0) return;
+        state.pages.splice(k, 1);
         renderGrid();
         renderCounts();
+        updateSheetButtons();
+        persist();
+      });
+      const rot = document.createElement("button");
+      rot.className = "cell-btn rot";
+      rot.type = "button";
+      rot.textContent = "↻";
+      rot.title = "Seite drehen";
+      rot.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        await rotatePage(page);
       });
       const one = document.createElement("button");
       one.className = "cell-btn img";
@@ -795,11 +973,12 @@
       one.textContent = "↓";
       one.addEventListener("click", async (ev) => {
         ev.stopPropagation();
-        await savePageImage(state.pages[i]);
+        await savePageImage(page);
       });
       cell.appendChild(img);
       cell.appendChild(num);
       cell.appendChild(del);
+      cell.appendChild(rot);
       cell.appendChild(one);
       ui.grid.appendChild(cell);
     });
@@ -847,12 +1026,21 @@
     if (!d || d.pid !== e.pointerId) return;
     d.cell.classList.remove("is-dragging");
     d.cell.style.transform = "";
+    const moved = d.on;
     state.drag = null;
+    if (moved) {
+      state.suppressClick = true;
+      setTimeout(() => (state.suppressClick = false), 50);
+      renderGrid();
+      renderCounts();
+      persist();
+    }
   };
   ui.grid.addEventListener("pointerup", endDrag);
   ui.grid.addEventListener("pointercancel", endDrag);
 
   ui.grid.addEventListener("click", (e) => {
+    if (state.suppressClick) return;
     const cell = e.target.closest(".cell");
     if (!cell || e.target.closest(".cell-btn")) return;
     editPage(state.pages[+cell.dataset.i]);
@@ -871,7 +1059,8 @@
       ctx.drawImage(img, 0, 0);
       const d = ctx.getImageData(0, 0, c.width, c.height);
       busyHide();
-      openReview({ rgba: d.data, w: c.width, h: c.height }, insetQuad(c.width, c.height, 0.005), page.id);
+      stopCamera();
+      openReview({ rgba: d.data, w: c.width, h: c.height }, insetQuad(c.width, c.height, 0), page.id, false);
     } catch (e) {
       busyHide();
       toast("Seite nicht lesbar");
@@ -891,12 +1080,6 @@
     return { url: c.toDataURL("image/jpeg", 0.9), w, h };
   }
 
-  const stamp = () => {
-    const d = new Date();
-    const p = (n) => String(n).padStart(2, "0");
-    return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
-  };
-
   function download(blob, filename) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -909,10 +1092,38 @@
   }
 
   async function savePageImage(page) {
+    const n = indexOfPage(page) + 1;
     const { url } = await pageDataUrl(page, 2600);
     const res = await fetch(url);
-    download(await res.blob(), `seite-${stamp()}.jpg`);
+    download(await res.blob(), `${fileBase()} - Seite ${n}.jpg`);
     toast("Seite gespeichert");
+  }
+
+  async function rotatePage(page) {
+    busy("Seite wird gedreht");
+    try {
+      const img = await loadImage(page.src);
+      const c = document.createElement("canvas");
+      c.width = img.naturalHeight;
+      c.height = img.naturalWidth;
+      const ctx = c.getContext("2d");
+      ctx.translate(c.width, 0);
+      ctx.rotate(Math.PI / 2);
+      ctx.drawImage(img, 0, 0);
+      page.src = c.toDataURL("image/jpeg", 0.92);
+      page.w = c.width;
+      page.h = c.height;
+      page.thumb = await makeThumb(page.src);
+      page.text = null;
+      page.words = null;
+      busyHide();
+      renderGrid();
+      renderCounts();
+      persist();
+    } catch (e) {
+      busyHide();
+      toast("Drehen fehlgeschlagen");
+    }
   }
 
   function addTextLayer(doc, page, geom) {
@@ -973,7 +1184,7 @@
       const blob = await buildPdf();
       busyHide();
       if (!blob) return;
-      download(blob, `scan-${stamp()}.pdf`);
+      download(blob, `${fileBase()}.pdf`);
       toast("PDF gespeichert");
     } catch (e) {
       busyHide();
@@ -987,9 +1198,9 @@
       const blob = await buildPdf();
       busyHide();
       if (!blob) return;
-      const file = new File([blob], `scan-${stamp()}.pdf`, { type: "application/pdf" });
+      const file = new File([blob], `${fileBase()}.pdf`, { type: "application/pdf" });
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        await navigator.share({ files: [file], title: "Scan" });
+        await navigator.share({ files: [file], title: fileBase() });
       } else {
         download(blob, file.name);
         toast("PDF gespeichert (Teilen nicht verfügbar)");
@@ -1014,7 +1225,7 @@
       const w = window.open("", "_blank");
       if (!w) { toast("Popup blockiert"); return; }
       const html =
-        "<!doctype html><html><head><meta charset='utf-8'><title>Scan</title><style>@page{margin:8mm}body{margin:0}img{width:100%;page-break-after:always;display:block}@media screen{img{max-width:100%;margin-bottom:8px}}</style></head><body>" +
+        "<!doctype html><html><head><meta charset='utf-8'><title>" + fileBase().replace(/[<>&]/g, "") + "</title><style>@page{margin:8mm}body{margin:0}img{width:100%;page-break-after:always;display:block}@media screen{img{max-width:100%;margin-bottom:8px}}</style></head><body>" +
         imgs.map((u) => `<img src="${u}">`).join("") +
         "</body></html>";
       w.document.write(html);
@@ -1095,11 +1306,14 @@
       toast("Texterkennung nicht verfügbar");
       return;
     }
-    const parts = [];
     let withWords = 0;
     try {
       for (let i = 0; i < state.pages.length; i++) {
         const page = state.pages[i];
+        if (page.text != null && page.words) {
+          if (page.words.length) withWords++;
+          continue;
+        }
         busy(`Text wird erkannt ${i + 1} von ${state.pages.length}`, i / state.pages.length);
         const img = await pageDataUrl(page, 2000);
         const res = await worker.recognize(img.url, {}, { text: true, blocks: true });
@@ -1111,34 +1325,129 @@
         page.ocrW = img.w;
         page.ocrH = img.h;
         if (words.length) withWords++;
-        parts.push(`--- Seite ${i + 1} ---\n${text || "(kein Text erkannt)"}`);
       }
       busyHide();
-      const blob = new Blob([parts.join("\n\n")], { type: "text/plain;charset=utf-8" });
-      download(blob, `scan-${stamp()}.txt`);
-      toast(
-        withWords
-          ? "Textdatei gespeichert. PDF enthält die unsichtbare Textebene."
-          : "Textdatei gespeichert."
-      );
+      persist();
+      showText(withWords);
     } catch (e) {
       busyHide();
       toast("Texterkennung fehlgeschlagen");
     }
   });
 
+  function allText() {
+    if (state.pages.length === 1) return String(state.pages[0].text || "").trim();
+    return state.pages
+      .map((p, i) => `--- Seite ${i + 1} ---\n${String(p.text || "").trim() || "(kein Text erkannt)"}`)
+      .join("\n\n");
+  }
+
+  function showText(withWords) {
+    ui.textOut.value = allText();
+    ui.textNote.textContent = withWords
+      ? "Der Text liegt jetzt auch unsichtbar im PDF. Das PDF ist dadurch durchsuchbar."
+      : "Es wurde kein Text erkannt.";
+    closeSheet();
+    ui.textSheet.hidden = false;
+  }
+
+  el("btnTextClose").addEventListener("click", () => {
+    ui.textSheet.hidden = true;
+    openSheet();
+  });
+
+  el("btnCopyText").addEventListener("click", async () => {
+    const t = ui.textOut.value;
+    try {
+      await navigator.clipboard.writeText(t);
+      toast("Text kopiert");
+    } catch (e) {
+      ui.textOut.focus();
+      ui.textOut.select();
+      try {
+        document.execCommand("copy");
+        toast("Text kopiert");
+      } catch (e2) {
+        toast("Kopieren nicht möglich, Text ist markiert");
+      }
+    }
+  });
+
+  el("btnSaveText").addEventListener("click", () => {
+    const blob = new Blob([ui.textOut.value], { type: "text/plain;charset=utf-8" });
+    download(blob, `${fileBase()}.txt`);
+    toast("Textdatei gespeichert");
+  });
+
+  function decodeImage(file) {
+    if (window.createImageBitmap) {
+      return createImageBitmap(file, { imageOrientation: "from-image" }).catch(() => decodeViaImg(file));
+    }
+    return decodeViaImg(file);
+  }
+
+  function decodeViaImg(file) {
+    const url = URL.createObjectURL(file);
+    return loadImage(url).finally(() => setTimeout(() => URL.revokeObjectURL(url), 1000));
+  }
+
+  async function openNextImport() {
+    while (state.importQueue.length) {
+      const file = state.importQueue.shift();
+      busy("Bild wird geladen");
+      try {
+        const img = await decodeImage(file);
+        const iw = img.width || img.naturalWidth;
+        const ih = img.height || img.naturalHeight;
+        if (!iw || !ih) throw new Error("leer");
+        const k = Math.min(1, 3000 / Math.max(iw, ih));
+        const w = Math.max(1, Math.round(iw * k));
+        const h = Math.max(1, Math.round(ih * k));
+        const c = document.createElement("canvas");
+        c.width = w;
+        c.height = h;
+        const ctx = c.getContext("2d", { willReadFrequently: true });
+        ctx.drawImage(img, 0, 0, w, h);
+        if (img.close) img.close();
+        const d = ctx.getImageData(0, 0, w, h);
+        const found = detectFromRGBA(d.data, w, h, 420);
+        busyHide();
+        stopCamera();
+        openReview({ rgba: d.data, w, h }, found || insetQuad(w, h, 0), null, !!found);
+        const left = state.importQueue.length;
+        toast(found ? "Blatt erkannt" + (left ? ` · noch ${left}` : "") : "Ganzes Bild übernommen, Ecken bei Bedarf ziehen" + (left ? ` · noch ${left}` : ""), 2600);
+        return true;
+      } catch (e) {
+        busyHide();
+        toast("Bild nicht lesbar: " + String(file.name || "").slice(0, 40), 3000);
+      }
+    }
+    return false;
+  }
+
+  const pickImages = () => ui.fileInput.click();
+  ui.importBtn.addEventListener("click", pickImages);
+  ui.importBig.addEventListener("click", pickImages);
+
+  ui.fileInput.addEventListener("change", async () => {
+    const files = Array.from(ui.fileInput.files || []).filter((f) => !f.type || f.type.startsWith("image/"));
+    ui.fileInput.value = "";
+    if (!files.length) {
+      toast("Bitte Bilddateien wählen (JPG, PNG, WebP)");
+      return;
+    }
+    state.importQueue.push.apply(state.importQueue, files);
+    if (!state.editing) await openNextImport();
+  });
+
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) stopCamera();
-    else if (!ui.review.classList.contains("is-active") && ui.pagesSheet.hidden) startCamera();
+    else if (!ui.review.classList.contains("is-active") && ui.pagesSheet.hidden && ui.textSheet.hidden) startCamera();
   });
   window.addEventListener("pagehide", stopCamera);
   window.addEventListener("resize", () => {
     if (state.editing && state.view) layout();
   });
-
-  if (!window.isSecureContext) {
-    toast("Kamera nur über HTTPS oder localhost", 6000);
-  }
 
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => {
@@ -1146,7 +1455,11 @@
     });
   }
 
+  state.docName = defaultDocName();
   renderCounts();
-  renderGrid();
   startCamera();
+  restore().then(() => {
+    renderCounts();
+    if (!ui.pagesSheet.hidden) renderGrid();
+  });
 })();

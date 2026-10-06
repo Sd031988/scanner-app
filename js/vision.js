@@ -477,6 +477,85 @@
     return out;
   }
 
+  function refineQuad(rgba, w, h, quad, radius) {
+    const lum = (x, y) => {
+      const c = bilinear(rgba, w, h, clamp(x, 0, w - 1), clamp(y, 0, h - 1));
+      return 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+    };
+    let cx = 0, cy = 0;
+    for (let i = 0; i < 4; i++) { cx += quad[i * 2] / 4; cy += quad[i * 2 + 1] / 4; }
+    const fitLine = (pts) => {
+      let mx = 0, my = 0;
+      for (const p of pts) { mx += p[0]; my += p[1]; }
+      mx /= pts.length; my /= pts.length;
+      let sxx = 0, sxy = 0, syy = 0;
+      for (const p of pts) {
+        const dx = p[0] - mx, dy = p[1] - my;
+        sxx += dx * dx; sxy += dx * dy; syy += dy * dy;
+      }
+      const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+      return { x: mx, y: my, dx: Math.cos(ang), dy: Math.sin(ang) };
+    };
+    const residual = (l, p) => Math.abs((p[0] - l.x) * -l.dy + (p[1] - l.y) * l.dx);
+    const lines = [];
+    for (let e = 0; e < 4; e++) {
+      const ax = quad[e * 2], ay = quad[e * 2 + 1];
+      const bx = quad[((e + 1) % 4) * 2], by = quad[((e + 1) % 4) * 2 + 1];
+      const len = Math.hypot(bx - ax, by - ay);
+      if (len < 16) return quad;
+      const tx = (bx - ax) / len, ty = (by - ay) / len;
+      let nx = -ty, ny = tx;
+      if ((cx - ax) * nx + (cy - ay) * ny > 0) { nx = -nx; ny = -ny; }
+      const n = Math.max(10, Math.min(64, Math.round(len / 10)));
+      const pts = [];
+      for (let i = 1; i < n; i++) {
+        const t = i / n;
+        if (t < 0.1 || t > 0.9) continue;
+        const px = ax + (bx - ax) * t, py = ay + (by - ay) * t;
+        let best = 0, bestD = 0;
+        for (let d = -radius; d <= radius; d += 0.5) {
+          let g = 0;
+          for (let s = -1; s <= 1; s++) {
+            const qx = px + tx * s * 1.5, qy = py + ty * s * 1.5;
+            g += lum(qx + nx * (d - 1.2), qy + ny * (d - 1.2)) - lum(qx + nx * (d + 1.2), qy + ny * (d + 1.2));
+          }
+          const a = Math.abs(g) / 3;
+          if (a > best) { best = a; bestD = d; }
+        }
+        if (best > 10) pts.push([px + nx * bestD, py + ny * bestD]);
+      }
+      if (pts.length < 5) { lines.push({ x: ax, y: ay, dx: tx, dy: ty }); continue; }
+      let line = fitLine(pts);
+      const keep = pts.filter((p) => residual(line, p) <= 1.5);
+      if (keep.length >= 5) line = fitLine(keep);
+      if (line.dx * tx + line.dy * ty < 0) { line.dx = -line.dx; line.dy = -line.dy; }
+      lines.push(line);
+    }
+    const out = new Float32Array(8);
+    for (let i = 0; i < 4; i++) {
+      const a = lines[(i + 3) % 4], b = lines[i];
+      const den = a.dx * b.dy - a.dy * b.dx;
+      if (Math.abs(den) < 1e-6) return quad;
+      const t = ((b.x - a.x) * b.dy - (b.y - a.y) * b.dx) / den;
+      const x = a.x + a.dx * t, y = a.y + a.dy * t;
+      if (Math.hypot(x - quad[i * 2], y - quad[i * 2 + 1]) > radius * 2.5) return quad;
+      out[i * 2] = x;
+      out[i * 2 + 1] = y;
+    }
+    return out;
+  }
+
+  function shrinkQuad(quad, frac) {
+    let cx = 0, cy = 0;
+    for (let i = 0; i < 4; i++) { cx += quad[i * 2] / 4; cy += quad[i * 2 + 1] / 4; }
+    const out = new Float32Array(8);
+    for (let i = 0; i < 4; i++) {
+      out[i * 2] = quad[i * 2] + (cx - quad[i * 2]) * frac;
+      out[i * 2 + 1] = quad[i * 2 + 1] + (cy - quad[i * 2 + 1]) * frac;
+    }
+    return out;
+  }
+
   function rotateRGBA(rgba, w, h, deg) {
     const d = ((deg % 360) + 360) % 360;
     if (d === 0) return { rgba, w, h };
@@ -658,7 +737,7 @@
     { id: "color", label: "Farbe" },
     { id: "clear", label: "Klar", hint: "ClearScan-Art: weisses Papier, glatter Text" },
     { id: "document", label: "Dokument" },
-    { id: "bw", label: "Schwarzweiß" }
+    { id: "bw", label: "S/W", hint: "Schwarzweiß" }
   ];
 
   function despeckle(cov, w, h, maxArea, maxDim) {
@@ -790,7 +869,7 @@
     clamp, luma, grayToRgba, boxBlur, sobel, otsu, edgeBinary, downsampleAvg, morph,
     traceBoundary, traceContours, polyArea, hullOf, bestQuad, orderCorners, quadArea,
     quadPerimeter, quadQuality, detectQuad, varianceOfLaplacian, deviation, homography,
-    applyH, applyHH, invert3, outputSize, warp, rotateRGBA, rotateQuad, histPercentile,
+    applyH, applyHH, invert3, outputSize, warp, refineQuad, shrinkQuad, rotateRGBA, rotateQuad, histPercentile,
     grayPercentile, applyLevels, downsamplePercentile, fillHoles, illuminationField,
     shadowPair, removeShadow, despeckle, adaptiveThreshold, applyFilter, FILTERS
   };

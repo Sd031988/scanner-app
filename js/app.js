@@ -29,7 +29,9 @@
     toast: el("toast"),
     importBtn: el("btnImport"),
     importBig: el("btnImportBig"),
+    photoBig: el("btnPhotoBig"),
     fileInput: el("fileInput"),
+    photoInput: el("photoInput"),
     noCam: el("noCam"),
     noCamText: el("noCamText"),
     docName: el("docName"),
@@ -475,7 +477,7 @@
     applyStageTransform();
   });
 
-  ui.shutter.addEventListener("click", () => capture());
+  ui.shutter.addEventListener("click", () => (state.stream ? capture() : ui.photoInput.click()));
 
   function setScreen(name) {
     el("cameraScreen").classList.toggle("is-active", name === "camera");
@@ -1428,17 +1430,20 @@
   const pickImages = () => ui.fileInput.click();
   ui.importBtn.addEventListener("click", pickImages);
   ui.importBig.addEventListener("click", pickImages);
+  ui.photoBig.addEventListener("click", () => ui.photoInput.click());
 
-  ui.fileInput.addEventListener("change", async () => {
-    const files = Array.from(ui.fileInput.files || []).filter((f) => !f.type || f.type.startsWith("image/"));
-    ui.fileInput.value = "";
+  const onFilesChosen = async (input) => {
+    const files = Array.from(input.files || []).filter((f) => !f.type || f.type.startsWith("image/"));
+    input.value = "";
     if (!files.length) {
       toast("Bitte Bilddateien wählen (JPG, PNG, WebP)");
       return;
     }
     state.importQueue.push.apply(state.importQueue, files);
     if (!state.editing) await openNextImport();
-  });
+  };
+  ui.fileInput.addEventListener("change", () => onFilesChosen(ui.fileInput));
+  ui.photoInput.addEventListener("change", () => onFilesChosen(ui.photoInput));
 
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) stopCamera();

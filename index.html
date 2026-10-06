@@ -13,6 +13,16 @@
 <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png" />
 <link rel="apple-touch-icon" href="icons/icon-180.png" />
 <link rel="stylesheet" href="app.css" />
+<script>
+(function () {
+  if (location.protocol !== "http:" || /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname)) return;
+  var ziel = "https://" + location.host + location.pathname + location.search + location.hash;
+  try {
+    fetch("https://" + location.host + location.pathname + "?https-test=" + Date.now(), { mode: "no-cors", cache: "no-store" })
+      .then(function () { location.replace(ziel); }, function () {});
+  } catch (e) {}
+})();
+</script>
 </head>
 <body>
 
@@ -33,7 +43,10 @@
   <div id="noCam" class="no-cam" hidden>
     <p class="no-cam-title">Keine Kamera verfügbar</p>
     <p id="noCamText" class="no-cam-text">Fotos oder Bilder vom Gerät importieren und wie einen Scan bearbeiten.</p>
-    <button id="btnImportBig" class="act" type="button">Bilder importieren</button>
+    <div class="no-cam-actions">
+      <button id="btnPhotoBig" class="act" type="button">Foto aufnehmen</button>
+      <button id="btnImportBig" class="act" type="button">Bilder importieren</button>
+    </div>
   </div>
 
   <div class="cam-bottom">
@@ -48,6 +61,7 @@
     </button>
   </div>
   <input id="fileInput" type="file" accept="image/*" multiple hidden />
+  <input id="photoInput" type="file" accept="image/*" capture="environment" hidden />
 </section>
 
 <section id="reviewScreen" class="screen">

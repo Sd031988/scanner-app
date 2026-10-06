@@ -177,6 +177,7 @@ body { position: fixed; inset: 0; }
 .no-cam[hidden] { display: none; }
 .no-cam-title { margin: 0 0 6px; font-size: 15px; font-weight: 700; color: var(--g); }
 .no-cam-text { margin: 0 0 16px; font-size: 13px; color: var(--fg); opacity: .8; line-height: 1.45; }
+.no-cam-actions { display: grid; gap: 8px; }
 .no-cam .act { width: 100%; }
 
 .last-page {
